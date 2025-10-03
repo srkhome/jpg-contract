@@ -1,0 +1,187 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>總管家收付款憑單文件合成</title>
+  <meta name="description" content="上傳至少 5 張圖片，支援拖曳排序，系統自動排成兩張 A4，輸出 PNG 或 PDF。" />
+  <meta name="theme-color" content="#7c3aed" />
+  <style>
+    :root{--bg:#0b0c10;--panel:#11131a;--text:#ecf0ff;--muted:#9aa3b5;--brand:#7c3aed;--line:#202336}
+    body{margin:0;font-family:system-ui,-apple-system,"Segoe UI",Roboto,"Noto Sans TC",Arial;background:var(--bg);color:var(--text)}
+    .wrap{max-width:1100px;margin:auto;padding:20px}
+    h1{margin:0 0 8px}
+    .card{background:linear-gradient(180deg,#101223,#0c0e16);border:1px solid var(--line);border-radius:12px;padding:16px;margin-bottom:16px}
+    label{font-size:14px;font-weight:700;color:#c8cdf0;display:block;margin-bottom:6px}
+    input[type=file]{display:block}
+    .btn{background:linear-gradient(135deg,var(--brand),#22d3ee);color:#0a0a0f;padding:9px 14px;border:none;border-radius:10px;font-weight:800;cursor:pointer;margin-right:6px}
+    .btn.secondary{background:transparent;color:#cfd4ff;border:1px solid #2a2d45}
+    .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+    .muted{color:var(--muted);font-size:12px}
+    canvas{max-width:100%;background:white;border:1px solid var(--line);border-radius:8px;margin-top:8px}
+    /* Sortable gallery */
+    .gallery{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:12px}
+    .item{background:#0f1120;border:1px solid #23263c;border-radius:10px;padding:8px;display:grid;gap:8px}
+    .thumb{aspect-ratio:4/3;background:#0c0e16;border:1px solid #1f2236;border-radius:8px;display:grid;place-items:center;overflow:hidden}
+    .thumb img{max-width:100%;max-height:100%;display:block}
+    .item .meta{display:flex;justify-content:space-between;align-items:center;font-size:12px;color:#aab0d6}
+    .item[draggable="true"]{cursor:grab}
+    .item.dragging{opacity:.5}
+    .item.drop-target{outline:2px dashed var(--brand);outline-offset:-6px}
+  </style>
+  <script src="https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js"></script>
+</head>
+<body>
+<div class="wrap">
+  <h1>總管家收付款憑單文件合成</h1>
+  <p class="muted">上傳 <strong>至少 5 張</strong> 圖片（最多 6 張）。在下方縮圖區可用「拖曳」調整順序：<strong>#1–#3 → 第 1 頁</strong>；<strong>#4–#6 → 第 2 頁</strong>（缺 #6 則留白）。</p>
+
+  <div class="card">
+    <label>一次選擇圖片（可多選，最多 6 張）</label>
+    <div class="row">
+      <input type="file" id="allInput" accept="image/*" multiple>
+      <button class="btn secondary" id="clearBtn">清空全部</button>
+      <span id="count" class="muted">尚未選取</span>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="row" style="justify-content:space-between;align-items:end">
+      <div>
+        <strong>目前順序（可拖曳調整）</strong>
+        <div class="muted">拖到目標位置即可換位。點右上角 ✕ 可刪除。</div>
+      </div>
+      <div class="muted">提示：#1–#3 為第 1 頁；#4–#6 為第 2 頁</div>
+    </div>
+    <div id="gallery" class="gallery" aria-live="polite"></div>
+  </div>
+
+  <div class="card">
+    <button class="btn" id="composeBtn">合成預覽</button>
+    <button class="btn secondary" id="downloadPngBtn" disabled>下載 PNG</button>
+    <button class="btn secondary" id="downloadPdfBtn" disabled>下載 PDF</button>
+  </div>
+
+  <div class="card">
+    <canvas id="preview" width="2480" height="7016" aria-label="合併預覽（A4×2）"></canvas>
+  </div>
+</div>
+
+<script>
+let images = []; // [{file, bmp, name, url, id}]
+const MAX = 6; const MIN = 5;
+const allInput = document.getElementById('allInput');
+const gallery = document.getElementById('gallery');
+const countEl = document.getElementById('count');
+const clearBtn = document.getElementById('clearBtn');
+
+allInput.addEventListener('change', async ()=>{
+  await addFiles(Array.from(allInput.files||[]));
+});
+
+clearBtn.addEventListener('click', ()=>{ images.forEach(i=>URL.revokeObjectURL(i.url)); images=[]; renderGallery(); enableDownloads(false); });
+
+async function addFiles(files){
+  for (const f of files.slice(0, MAX - images.length)){
+    if(!f.type.startsWith('image/')) continue;
+    const bmp = await createImageBitmap(f).catch(()=>null);
+    if(!bmp) continue;
+    images.push({ file:f, bmp, name:f.name, url:URL.createObjectURL(f), id:crypto.randomUUID() });
+  }
+  renderGallery();
+}
+
+function renderGallery(){
+  if(images.length>MAX) images = images.slice(0,MAX);
+  countEl.textContent = images.length ? `已選取 ${images.length} 張` : '尚未選取';
+  gallery.innerHTML = images.map((it, idx)=>{
+    return `<div class="item" draggable="true" data-id="${it.id}" aria-label="第 ${idx+1} 位">
+      <div class="thumb"><img src="${it.url}" alt="縮圖 ${idx+1}"></div>
+      <div class="meta">
+        <span>#${idx+1}</span>
+        <button class="btn secondary" data-del data-id="${it.id}" title="刪除">✕</button>
+      </div>
+      <div class="muted" title="${it.name}">${it.name}</div>
+    </div>`
+  }).join('');
+
+  // 刪除
+  gallery.querySelectorAll('[data-del]').forEach(btn=>{
+    btn.addEventListener('click', ()=>{
+      const id = btn.getAttribute('data-id');
+      const i = images.findIndex(x=>x.id===id);
+      if(i>-1){ URL.revokeObjectURL(images[i].url); images.splice(i,1); renderGallery(); enableDownloads(false);}  
+    });
+  });
+
+  // 拖曳
+  let dragId = null;
+  gallery.querySelectorAll('.item').forEach(card=>{
+    card.addEventListener('dragstart', e=>{ dragId = card.dataset.id; card.classList.add('dragging'); e.dataTransfer.effectAllowed='move'; });
+    card.addEventListener('dragend', ()=>{ dragId=null; card.classList.remove('dragging'); gallery.querySelectorAll('.drop-target').forEach(el=>el.classList.remove('drop-target')); });
+    card.addEventListener('dragover', e=>{ e.preventDefault(); card.classList.add('drop-target'); });
+    card.addEventListener('dragleave', ()=> card.classList.remove('drop-target'));
+    card.addEventListener('drop', e=>{
+      e.preventDefault();
+      const targetId = card.dataset.id;
+      if(!dragId || dragId===targetId) return;
+      const from = images.findIndex(x=>x.id===dragId);
+      const to = images.findIndex(x=>x.id===targetId);
+      if(from>-1 && to>-1){
+        const [moved] = images.splice(from,1);
+        images.splice(to,0,moved);
+        renderGallery();
+      }
+    });
+  });
+}
+
+// ===== 合成 / 輸出 =====
+const A4_W=2480, A4_H=3508, TOTAL_H=A4_H*2;
+const preview = document.getElementById('preview');
+const ctx = preview.getContext('2d');
+const composeBtn = document.getElementById('composeBtn');
+const pngBtn = document.getElementById('downloadPngBtn');
+const pdfBtn = document.getElementById('downloadPdfBtn');
+
+function enableDownloads(v){ pngBtn.disabled = !v; pdfBtn.disabled = !v; }
+
+function rowHeights(total, rows){ const base=Math.floor(total/rows), rem=total%rows, hs=Array(rows).fill(base); for(let i=0;i<rem;i++) hs[i]++; return hs; }
+function drawFitted(bmp,x,y,w,h){ if(!bmp){ ctx.strokeStyle='#ccc'; ctx.strokeRect(x+0.5,y+0.5,w-1,h-1); return;} const r=Math.min(w/bmp.width,h/bmp.height); const dw=Math.floor(bmp.width*r), dh=Math.floor(bmp.height*r); const ox=x+Math.floor((w-dw)/2), oy=y+Math.floor((h-dh)/2); ctx.imageSmoothingQuality='high'; ctx.drawImage(bmp,ox,oy,dw,dh); }
+
+function compose(){
+  ctx.fillStyle='#ffffff'; ctx.fillRect(0,0,A4_W,TOTAL_H);
+  const h1=rowHeights(A4_H,3); let y=0;
+  for(let i=0;i<3;i++){ drawFitted(images[i]?.bmp, 0, y, A4_W, h1[i]); y+=h1[i]; }
+  const h2=rowHeights(A4_H,3); y=A4_H;
+  for(let i=3;i<6;i++){ drawFitted(images[i]?.bmp, 0, y, A4_W, h2[i-3]); y+=h2[i-3]; }
+}
+
+composeBtn.addEventListener('click', ()=>{
+  if(images.length < MIN){ alert(`請至少提供 ${MIN} 張圖片`); return; }
+  compose();
+  enableDownloads(true);
+});
+
+pngBtn.addEventListener('click', ()=>{
+  preview.toBlob(b=>{ if(!b) return; const a=document.createElement('a'); a.href=URL.createObjectURL(b); a.download='合成2頁.png'; a.click(); setTimeout(()=>URL.revokeObjectURL(a.href), 1000); }, 'image/png');
+});
+
+pdfBtn.addEventListener('click', ()=>{
+  const {jsPDF} = window.jspdf; const pdf = new jsPDF({orientation:'p',unit:'pt',format:'a4'});
+  // 頁1
+  const page1 = document.createElement('canvas'); page1.width=A4_W; page1.height=A4_H; const c1=page1.getContext('2d');
+  c1.fillStyle='#fff'; c1.fillRect(0,0,A4_W,A4_H); let h1=rowHeights(A4_H,3); let y=0;
+  for(let i=0;i<3;i++){ const bmp=images[i]?.bmp; if(bmp){ const r=Math.min(A4_W/bmp.width,h1[i]/bmp.height); const dw=bmp.width*r, dh=bmp.height*r; const ox=(A4_W-dw)/2, oy=y+(h1[i]-dh)/2; c1.drawImage(bmp,ox,oy,dw,dh);} y+=h1[i]; }
+  pdf.addImage(page1.toDataURL('image/jpeg',0.95),'JPEG',0,0,pdf.internal.pageSize.getWidth(),pdf.internal.pageSize.getHeight());
+  // 頁2
+  pdf.addPage();
+  const page2 = document.createElement('canvas'); page2.width=A4_W; page2.height=A4_H; const c2=page2.getContext('2d');
+  c2.fillStyle='#fff'; c2.fillRect(0,0,A4_W,A4_H); let h2=rowHeights(A4_H,3); y=0;
+  for(let i=3;i<6;i++){ const bmp=images[i]?.bmp; if(bmp){ const r=Math.min(A4_W/bmp.width,h2[i-3]/bmp.height); const dw=bmp.width*r, dh=bmp.height*r; const ox=(A4_W-dw)/2, oy=y+(h2[i-3]-dh)/2; c2.drawImage(bmp,ox,oy,dw,dh);} y+=h2[i-3]; }
+  pdf.addImage(page2.toDataURL('image/jpeg',0.95),'JPEG',0,0,pdf.internal.pageSize.getWidth(),pdf.internal.pageSize.getHeight());
+  pdf.save('合成2頁.pdf');
+});
+</script>
+</body>
+</html>
